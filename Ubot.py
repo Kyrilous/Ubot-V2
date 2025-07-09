@@ -44,8 +44,8 @@ def fetch_sheet_data(sheet):
     return sheet.get_all_records()
 
 
-DEV_KEYWORDS = {"devtracker", "feature", "features","dev tracker"}
-TRANSCRIPT_KEYWORDS = {"transcript", "transcripts", "interview", "interviews"}
+DEV_KEYWORDS = {"devtracker", "dev tracker"}
+TRANSCRIPT_KEYWORDS = {"transcript", "transcripts", "interview", "interviews", "feature", "features", "requested"}
 
 
 def choose_sheet_to_open(command):
@@ -57,6 +57,7 @@ def choose_sheet_to_open(command):
     return None
 
 
+# Returns interview notes for one given interviewee.
 def extract_user_interview_notes(sheet, name: str) -> list[str]:
     headers = sheet.row_values(1)
 
@@ -71,20 +72,77 @@ def extract_user_interview_notes(sheet, name: str) -> list[str]:
     entries = [cell for cell in data[1:] if cell.strip()]
     return entries
 
-
+#Not yet used
 def is_interview_query(cmd: str) -> bool:
-    interview_kw = {"interview", "transcript", "meeting", "1:1"}
+    interview_kw = {"interview", "interviews", "meeting", "meetings", "1:1"}
     return any(kw in cmd.lower() for kw in interview_kw)
+
+async def return_features(command: str) -> str:
+    data = fetch_sheet_data(interview_notes)
+    all_text = "\n\n".join(
+        " ".join(row.get(col, "") for col in row.keys())
+        for row in data
+    )
+
+    prompt = (
+            "You are given raw interview responses. "
+            "Extract all distinct product-improvement ideas mentioned (this includes feature requests, usability enhancements, and bug-fix requests), "
+            "count how many times each appears, and return the top 10 as a numbered list. Keep the output as short as possible (Under 2000 characters). Return a list of the top requested features along with how many times they were requested. like:\n"
+            "1. Dark mode toggle (12 mentions)\n"
+            "2. Fix login crash on Android (9 mentions)\n"
+            "…\n\n"
+            + all_text
+    )
+
+    # Send to Gemini
+    genai.configure(api_key=API_KEY)
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    try:
+        resp = await asyncio.to_thread(model.generate_content, prompt)
+        return resp.text.strip()
+    except Exception as e:
+        return f"Something went wrong: {e}"
+
+
+
+async def interview_route(command: str) -> str:
+    data = fetch_sheet_data(interview_notes)
+    all_text = "\n\n".join(
+        " ".join(row.get(col, "") for col in row.keys())
+        for row in data
+    )
+    prompt = f"You are given raw interview responses from beta users for the Ubiq app. Here is your prompt {command} and here is your data set {all_text}"
+    await call_gemini(prompt)
+
+
+
+
+async def call_gemini(prompt):
+    genai.configure(api_key=API_KEY)
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    try:
+        resp = await asyncio.to_thread(model.generate_content, prompt)
+        return resp.text.strip()
+    except Exception as e:
+        return f"Something went wrong: {e}"
+
 
 
 # Choose which sheet to open, send sheet data along with prompt to gemini, output response.
 async def run_command(command: str) -> str:
     sheet = choose_sheet_to_open(command)
-    if not sheet:
+    if sheet:
+        confirmation = f"Opened sheet: {sheet.title} (ID: {sheet.id})"
+        print(confirmation)
+    else:
         return "Sorry, I couldn't figure out which sheet to open."
 
     data = fetch_sheet_data(sheet)
     text = command.lower()
+
+    if "feature" and "top" or "feature request" or "features" in text:
+        await return_features(command)
+
 
     #Interview path
     if "interview" in text:
@@ -128,13 +186,7 @@ async def run_command(command: str) -> str:
         )
 
     #Send to Gemini
-    genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash-latest")
-    try:
-        resp = await asyncio.to_thread(model.generate_content, prompt)
-        return resp.text.strip()
-    except Exception as e:
-        return f"Something went wrong: {e}"
+    return await call_gemini(prompt)
 
 
 # Logging functions
@@ -162,14 +214,14 @@ Return JSON {{"contributions": [{{"username":...,"contribution":...}}, ...]}} fo
 or a concise summary if summarizing.
 Messages:
 {joined}
-"""
+"""     
 
 async def generate_contribution_data(messages):
     if not messages:
         return {"contributions": []}
     prompt = prepare_prompt(messages)
     genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash-latest")
+    model = genai.GenerativeModel("gemini-2.0-flash")
     try:
         resp = await asyncio.to_thread(model.generate_content, prompt)
         match = re.search(r"\{.*\}", resp.text, re.DOTALL)
@@ -199,7 +251,7 @@ async def summarize_and_post(guild, after=None):
     # generate summary
     prompt = prepare_prompt(msgs, task="Summarize")
     genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash-latest")
+    model = genai.GenerativeModel("gemini-2.0-flash")
     try:
         resp = await asyncio.to_thread(model.generate_content, prompt)
         summary = resp.text.strip()
