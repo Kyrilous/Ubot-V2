@@ -30,30 +30,55 @@ contributions_sheet = gs_client.open_by_key(SHEET_ID_IP2_HUB).worksheet("Insider
 
 #User Interviews Sheet
 SHEET_ID_IP3_USER_INTERVIEWS = "1HyxWL3w7RVQ1Rto9PYFs5FoJQHLs19e6SJsprsqo3zQ"
-user_transcripts = gs_client.open_by_key(SHEET_ID_IP3_USER_INTERVIEWS).worksheet("User Transcripts")
+#user_transcripts = gs_client.open_by_key(SHEET_ID_IP3_USER_INTERVIEWS).worksheet("User Transcripts")
 interview_notes = gs_client.open_by_key(SHEET_ID_IP3_USER_INTERVIEWS).worksheet("NEW Interview Tracking")
 
 #Dev Tracker Sheet
 SHEET_ID_DEV = "15Ysw6xXSLZaRa_BP7cQH2CBeRxh7FMFvLEy3R9YQmd8"
 dev_sheet = gs_client.open_by_key(SHEET_ID_DEV).worksheet("Bravos")
 
+#Product Master SHeet
+SHEET_ID_PRODUCT_MASTER = "1Z0DfNptoMW1R_s19aYnHRhacQv1sUZd5yopi3p2EDZE"
+product_master_sheet = gs_client.open_by_key(SHEET_ID_PRODUCT_MASTER).worksheet("MASTER Product Roadmap ")
+
 #Channels to ignore
 IGNORE_CHANNELS = ["👋welcome👋", "🙋intros🙋", "🔊announcements🔊", "📌rules📌", "team-ubiq"]
 
 #Returns all data in given sheet.
 def fetch_sheet_data(sheet):
-    return sheet.get_all_records()
+    records = sheet.get_all_records()
+    print(f"Loaded {sheet.title} With {len(records)} rows:")
+    # for r in records:
+    #     print(r)
+    return records
 
-
+    
 def choose_sheet_to_open(command):
-    text = command.lower()
-    if ("interview" in text and "devtracker" in text) or ("interviews" in text and "devtracker" in text) or ("interview" in text and "dev tracker" in text) or ("interviews" in text and "dev tracker" in text):
-        return interview_notes, dev_sheet
-    elif "interview" or "interviews" in text:
-        return interview_notes
-    elif "dev tracker" or "devtracker"  in text:
-        return dev_sheet
-    else: return "Couldn't figure out which sheet to open"
+ text = command.lower()
+ # Product Master, Interviews, AND Dev Tracker query 
+ if ("interview" in text or "interviews" in text) and ("devtracker" in text or "dev tracker" in text) and ("productmaster" in text or "product master" in text):
+     return interview_notes, dev_sheet, product_master_sheet
+ #Interview and Dev Tracker query
+ elif ("interview" in text or "interviews" in text) and ("devtracker" in text or "dev tracker" in text):
+     return interview_notes, dev_sheet
+ #Interview and Product Master query
+ elif ("interview" in text or "interviews" in text) and ("productmaster" in text or "product master" in text):
+     return interview_notes, product_master_sheet
+ #Product Master and Dev Tracker query
+ elif ("product master" in text or "productmaster" in text) and ("devtracker" in text or "dev tracker" in text):
+     return product_master_sheet, dev_sheet
+ #Pure interviews
+ elif "interview" in text or "interviews" in text:
+     return interview_notes
+ #Pure dev-tracker
+ elif "devtracker" in text or "dev tracker" in text:
+     return dev_sheet
+ #Pure product master
+ elif "product master" in text or "master" in text or "product" in text:
+     return product_master_sheet
+ else:
+     return "Couldn't figure out which sheet to open"
+
 
 
 # Returns interview notes for one given interviewee.
@@ -92,35 +117,53 @@ async def run_command(command: str) -> str:
     # Detect which sheets are requested
     has_dev = "devtracker" in clean_no_space or "dev tracker" in clean
     has_intv = "interview" in clean or "interviews" in clean
+    has_pmaster = "product master" in clean or "master" in clean or "product" in clean
     choice = choose_sheet_to_open(command)
 
-    # Handle both Dev-Tracker and Interviews
-    if has_dev and has_intv and isinstance(choice, tuple):
-        intv_sheet, dev_sheet_choice = choice
-        dev_data = fetch_sheet_data(dev_sheet_choice)
-        intv_data = fetch_sheet_data(intv_sheet)
+    # Handle Dev-Tracker, Interviews, and Product Master
+    if has_dev and has_intv and has_pmaster and isinstance(choice, tuple):
+        sheet_a, sheet_b, sheet_c  = choice
+        data_a = fetch_sheet_data(sheet_a)
+        data_b = fetch_sheet_data(sheet_b)
+        data_c = fetch_sheet_data(sheet_c)
 
         prompt = (
             "Dev Tracker:\n"
-            f"{json.dumps(dev_data, indent=2)}\n\n"
+            f"{sheet_a.title} Data: {json.dumps(data_a, indent=2)}\n\n"
             "User Interviews:\n"
-            f"{json.dumps(intv_data, indent=2)}\n\n"
+            f"{sheet_b.title} Data: {json.dumps(data_b, indent=2)}\n\n"
+            "Product Master:\n"
+            f"{sheet_c.title} Data: {json.dumps(data_c, indent=2)}\n\n"
             f"Question: {command}\n"
-            "Please keep your answer under 2000 characters."
+            "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
         )
         return await call_gemini(prompt)
 
-    # 4) Single sheet logic. Must be a single Worksheet here
+    # Handles 2 sheet case
+    if isinstance(choice, tuple) and len(choice) == 2:
+        sheet_a, sheet_b = choice
+        data_a = fetch_sheet_data(sheet_a)
+        data_b = fetch_sheet_data(sheet_b)
+        prompt = (
+            f"{sheet_a.title} Data:\n{json.dumps(data_a, indent=2)}\n\n"
+            f"{sheet_b.title} Data:\n{json.dumps(data_b, indent=2)}\n\n"
+            f"Question: {command}\n"
+            "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
+        )
+        return await call_gemini(prompt)
+
+
+    # Single sheet logic. Must be a single Worksheet here
     if not isinstance(choice, tuple):
         sheet = choice  # type: ignore
-        # echo for your logs (won’t reach Discord)
+        # Debugging log
         print(f"Opened sheet: {sheet.title} (ID: {sheet.id})")
 
 
         headers = sheet.row_values(1)
         has_name = any(h.lower() in clean for h in headers)
 
-        # Name-specific interview
+        # Name specific interview command
         if has_intv and has_name:
             interviewee = next(
                 (h for h in headers if h.lower() in clean),
@@ -133,14 +176,14 @@ async def run_command(command: str) -> str:
             prompt = (
                 f"{command}\n\n"
                 f"{notes_str}\n\n"
-                "Please keep your answer under 2000 characters."
+                "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
             )
             return await call_gemini(prompt)
 
         # Only “interview”
         elif has_intv:
             interview_data = fetch_sheet_data(interview_notes)
-            prompt = f"Interview data:{interview_data} '\n' Prompt: {command} KEEP YOUR RESPONSE UNDER 2000 CHARACTERS\n\n"
+            prompt = f"Interview data:{interview_data} '\n' Prompt: {command} KEEP YOUR RESPONSE UNDER 2000 CHARACTERS and no less than 1000 characters, but be as detailed and through as possible.\n\n"
             return await call_gemini(prompt)
 
         # 4c) Dev tracker only
@@ -150,7 +193,17 @@ async def run_command(command: str) -> str:
                 "Dev Tracker:\n"
                 f"{json.dumps(dev_data, indent=2)}\n\n"
                 f"Question: {command}\n"
-                "Please keep your answer under 2000 characters."
+                "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
+            )
+            return await call_gemini(prompt)
+
+        elif has_pmaster:
+            pmaster_data = fetch_sheet_data(product_master_sheet)
+            prompt = (
+                "Product Master:\n"
+                f"{json.dumps(pmaster_data, indent=2)}\n\n"
+                f"Question: {command}\n"
+                "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
             )
             return await call_gemini(prompt)
 
@@ -198,7 +251,6 @@ async def generate_contribution_data(messages):
         return json.loads(match.group()) if match else {"contributions": []}
     except Exception:
         return {"contributions": []}
-
 # Collect messages since a given time
 async def collect_messages(guild, after=None):
     msgs = []
@@ -260,29 +312,18 @@ async def summary_cmd(ctx):
 
 @client.command(name="count_answers")
 @commands.has_permissions(administrator=True)
+
 async def count_answers(ctx, channel_name: str = "📊prompts-and-polls📊"):
     ch = discord.utils.get(ctx.guild.text_channels, name=channel_name)
     if not ch:
-        return await ctx.send(f"❌ Channel `{channel_name}` not found.")
+        return await ctx.send(f" Channel `{channel_name}` not found.")
     msgs = []
-    async for m in ch.history(limit=None, after=datetime.now()-timedelta(days=1)):
+    async for m in ch.history(limit=None):
         if not m.author.bot and m.content.strip():
             msgs.append((m.author.name, m.content))
     data = await generate_contribution_data(msgs)
     total = len(data.get("contributions", []))
     await ctx.send(f"📊 Found **{total}** meaningful answers in `#{channel_name}`.")
-
-@client.command(name="count_messages")
-@commands.has_permissions(administrator=True)
-async def count_messages(ctx, channel_name: str = "📊prompts-and-polls📊"):
-    ch = discord.utils.get(ctx.guild.text_channels, name=channel_name)
-    if not ch:
-        return await ctx.send(f"❌ Channel `{channel_name}` not found.")
-    cnt = 0
-    async for m in ch.history(limit=None, after=datetime.now()-timedelta(days=1)):
-        if m.author.name.lower() != "ubiq.world":
-            cnt += 1
-    await ctx.send(f"📊 Total messages in `#{channel_name}` (last 24h): **{cnt}**")
 
 # Events
 @client.event
