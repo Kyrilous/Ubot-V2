@@ -1,4 +1,5 @@
 import discord
+import string
 import gspread
 from google.oauth2.service_account import Credentials
 from discord.ext import commands
@@ -44,17 +45,15 @@ def fetch_sheet_data(sheet):
     return sheet.get_all_records()
 
 
-DEV_KEYWORDS = {"devtracker", "dev tracker"}
-TRANSCRIPT_KEYWORDS = {"transcript", "transcripts", "interview", "interviews", "feature", "features", "requested"}
-
-
 def choose_sheet_to_open(command):
     text = command.lower()
-    if any(kw in text for kw in TRANSCRIPT_KEYWORDS):
+    if ("interview" in text and "devtracker" in text) or ("interviews" in text and "devtracker" in text) or ("interview" in text and "dev tracker" in text) or ("interviews" in text and "dev tracker" in text):
+        return interview_notes, dev_sheet
+    elif "interview" or "interviews" in text:
         return interview_notes
-    if any(kw in text for kw in DEV_KEYWORDS):
+    elif "dev tracker" or "devtracker"  in text:
         return dev_sheet
-    return None
+    else: return "Couldn't figure out which sheet to open"
 
 
 # Returns interview notes for one given interviewee.
@@ -68,53 +67,9 @@ def extract_user_interview_notes(sheet, name: str) -> list[str]:
 
     data = sheet.col_values(col_index)
 
-    #Drop the header row and any blank cells
+    # Drop the header row and any blank cells
     entries = [cell for cell in data[1:] if cell.strip()]
     return entries
-
-#Not yet used
-def is_interview_query(cmd: str) -> bool:
-    interview_kw = {"interview", "interviews", "meeting", "meetings", "1:1"}
-    return any(kw in cmd.lower() for kw in interview_kw)
-
-async def return_features(command: str) -> str:
-    data = fetch_sheet_data(interview_notes)
-    all_text = "\n\n".join(
-        " ".join(row.get(col, "") for col in row.keys())
-        for row in data
-    )
-
-    prompt = (
-            "You are given raw interview responses. "
-            "Extract all distinct product-improvement ideas mentioned (this includes feature requests, usability enhancements, and bug-fix requests), "
-            "count how many times each appears, and return the top 10 as a numbered list. Keep the output as short as possible (Under 2000 characters). Return a list of the top requested features along with how many times they were requested. like:\n"
-            "1. Dark mode toggle (12 mentions)\n"
-            "2. Fix login crash on Android (9 mentions)\n"
-            "…\n\n"
-            + all_text
-    )
-
-    # Send to Gemini
-    genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
-    try:
-        resp = await asyncio.to_thread(model.generate_content, prompt)
-        return resp.text.strip()
-    except Exception as e:
-        return f"Something went wrong: {e}"
-
-
-
-async def interview_route(command: str) -> str:
-    data = fetch_sheet_data(interview_notes)
-    all_text = "\n\n".join(
-        " ".join(row.get(col, "") for col in row.keys())
-        for row in data
-    )
-    prompt = f"You are given raw interview responses from beta users for the Ubiq app. Here is your prompt {command} and here is your data set {all_text}"
-    await call_gemini(prompt)
-
-
 
 
 async def call_gemini(prompt):
@@ -128,65 +83,81 @@ async def call_gemini(prompt):
 
 
 
-# Choose which sheet to open, send sheet data along with prompt to gemini, output response.
 async def run_command(command: str) -> str:
-    sheet = choose_sheet_to_open(command)
-    if sheet:
-        confirmation = f"Opened sheet: {sheet.title} (ID: {sheet.id})"
-        print(confirmation)
-    else:
-        return "Sorry, I couldn't figure out which sheet to open."
+    # Simplify the command text
+    translator = str.maketrans("", "", string.punctuation)
+    clean = command.translate(translator).lower()
+    clean_no_space = clean.replace(" ", "")
 
-    data = fetch_sheet_data(sheet)
-    text = command.lower()
+    # Detect which sheets are requested
+    has_dev = "devtracker" in clean_no_space or "dev tracker" in clean
+    has_intv = "interview" in clean or "interviews" in clean
+    choice = choose_sheet_to_open(command)
 
-    if "feature" and "top" or "feature request" or "features" in text:
-        await return_features(command)
+    # Handle both Dev-Tracker and Interviews
+    if has_dev and has_intv and isinstance(choice, tuple):
+        intv_sheet, dev_sheet_choice = choice
+        dev_data = fetch_sheet_data(dev_sheet_choice)
+        intv_data = fetch_sheet_data(intv_sheet)
+
+        prompt = (
+            "Dev Tracker:\n"
+            f"{json.dumps(dev_data, indent=2)}\n\n"
+            "User Interviews:\n"
+            f"{json.dumps(intv_data, indent=2)}\n\n"
+            f"Question: {command}\n"
+            "Please keep your answer under 2000 characters."
+        )
+        return await call_gemini(prompt)
+
+    # 4) Single sheet logic. Must be a single Worksheet here
+    if not isinstance(choice, tuple):
+        sheet = choice  # type: ignore
+        # echo for your logs (won’t reach Discord)
+        print(f"Opened sheet: {sheet.title} (ID: {sheet.id})")
 
 
-    #Interview path
-    if "interview" in text:
-        #Grab header row
         headers = sheet.row_values(1)
-        #Try to match any header by name
-        match = None
-        for hdr in headers:
-            # assume headers look like "Erica Banga’s Meeting"
-            name = hdr.lower().split("’")[0]  # "erica banga"
-            if name in text:
-                match = hdr
-                break
+        has_name = any(h.lower() in clean for h in headers)
 
-        if not match:
-            #List the simplified names back to the user
-            choices = [h.split("’")[0] for h in headers]
-            return (
-                "Which interviewee do you mean? "
-                f"Try one of: {', '.join(choices)}"
+        # Name-specific interview
+        if has_intv and has_name:
+            interviewee = next(
+                (h for h in headers if h.lower() in clean),
+                None
             )
+            assert interviewee is not None
 
-        #Pull only that column
-        notes = extract_user_interview_notes(sheet, match.split("’")[0])
-        if not notes:
-            return f"No notes found for {match.split('’')[0]}."
+            notes = extract_user_interview_notes(sheet, interviewee)
+            notes_str = "\n".join(notes)
+            prompt = (
+                f"{command}\n\n"
+                f"{notes_str}\n\n"
+                "Please keep your answer under 2000 characters."
+            )
+            return await call_gemini(prompt)
 
-        prompt = (
-            f"Here are the interview notes for **{match.split('’')[0]}**:\n\n"
-            + "\n".join(f"- {n}" for n in notes)
-            + f"\n\nQuestion: {command}"
-            + "Please keep your output below 2000 characters."
-        )
+        # Only “interview”
+        elif has_intv:
+            interview_data = fetch_sheet_data(interview_notes)
+            prompt = f"Interview data:{interview_data} '\n' Prompt: {command} KEEP YOUR RESPONSE UNDER 2000 CHARACTERS\n\n"
+            return await call_gemini(prompt)
 
-    #Non-interview path (full dump)
-    else:
-        prompt = (
-            f"Full contents of **{sheet.title}**:\n"
-            f"{json.dumps(data, indent=2)}\n\n"
-            f"User asked: {command}"
-        )
+        # 4c) Dev tracker only
+        elif has_dev:
+            dev_data = fetch_sheet_data(sheet)
+            prompt = (
+                "Dev Tracker:\n"
+                f"{json.dumps(dev_data, indent=2)}\n\n"
+                f"Question: {command}\n"
+                "Please keep your answer under 2000 characters."
+            )
+            return await call_gemini(prompt)
 
-    #Send to Gemini
-    return await call_gemini(prompt)
+    # 5) Fallback for everything else
+    return (
+        "Sorry, I didn’t understand that command. "
+    )
 
 
 # Logging functions
@@ -209,9 +180,8 @@ def log_summary(summary):
 def prepare_prompt(messages, task="Analyze"):
     joined = "\n".join(f"User: {u} - Message: {m}" for u, m in messages)
     return f"""
-{task} Discord messages and extract only meaningful contributions (bugs, feedback, feature requests, answers).
-Return JSON {{"contributions": [{{"username":...,"contribution":...}}, ...]}} for analyze;
-or a concise summary if summarizing.
+{task} Discord messages and extract only meaningful contributions (bugs, feedback, feature requests, answers). Return
+a concise summary of what the messages consist of.
 Messages:
 {joined}
 """     
@@ -229,7 +199,7 @@ async def generate_contribution_data(messages):
     except Exception:
         return {"contributions": []}
 
-# Collect messages since a given time\
+# Collect messages since a given time
 async def collect_messages(guild, after=None):
     msgs = []
     for channel in guild.text_channels:
@@ -249,6 +219,7 @@ async def summarize_and_post(guild, after=None):
     if not msgs:
         return
     # generate summary
+    #print(msgs[0:])
     prompt = prepare_prompt(msgs, task="Summarize")
     genai.configure(api_key=API_KEY)
     model = genai.GenerativeModel("gemini-2.0-flash")
@@ -280,9 +251,9 @@ async def daily_summary_task():
         for g in client.guilds:
             await summarize_and_post(g, after=since)
 
-# Commands\@client.command(name="summary")
+@client.command(name="summary")
 async def summary_cmd(ctx):
-    # manual summary: past 24h
+    # Manual summary: past 24h
     since = datetime.now() - timedelta(days=1)
     await summarize_and_post(ctx.guild, after=since)
     await ctx.send("✅ Summary generated.")
