@@ -28,10 +28,16 @@ SHEET_ID_IP2_HUB = "1ZOYfeYQYpMRNeM4sEvCZZBKwxSUeFAUZEOfnj0WEzCI"
 summaries_sheet = gs_client.open_by_key(SHEET_ID_IP2_HUB).worksheet("Ubot Summaries")
 contributions_sheet = gs_client.open_by_key(SHEET_ID_IP2_HUB).worksheet("Insider Contributions")
 
-#User Interviews Sheet
-SHEET_ID_IP3_USER_INTERVIEWS = "1HyxWL3w7RVQ1Rto9PYFs5FoJQHLs19e6SJsprsqo3zQ"
+#User Interviews Sheet (NO LONGER NEEDED, USING TRANSCRIPT FILE INSTEAD)
+#SHEET_ID_IP3_USER_INTERVIEWS = "1HyxWL3w7RVQ1Rto9PYFs5FoJQHLs19e6SJsprsqo3zQ"
 #user_transcripts = gs_client.open_by_key(SHEET_ID_IP3_USER_INTERVIEWS).worksheet("User Transcripts")
-interview_notes = gs_client.open_by_key(SHEET_ID_IP3_USER_INTERVIEWS).worksheet("NEW Interview Tracking")
+#interview_notes = gs_client.open_by_key(SHEET_ID_IP3_USER_INTERVIEWS).worksheet("NEW Interview Tracking")
+TRANSCRIPTS_FILE=os.path.join(
+    os.path.dirname(__file__),
+    "transcripts",
+    "ALL_OTTER_TRANSCRIPTS_noblanks.txt"
+)
+
 
 #Dev Tracker Sheet
 SHEET_ID_DEV = "15Ysw6xXSLZaRa_BP7cQH2CBeRxh7FMFvLEy3R9YQmd8"
@@ -44,6 +50,19 @@ product_master_sheet = gs_client.open_by_key(SHEET_ID_PRODUCT_MASTER).worksheet(
 #Channels to ignore
 IGNORE_CHANNELS = ["👋welcome👋", "🙋intros🙋", "🔊announcements🔊", "📌rules📌", "team-ubiq"]
 
+
+MAX_DISCORD_MSG = 2000
+
+async def send_long(channel, content: str):
+    for i in range(0, len(content), MAX_DISCORD_MSG):
+        await channel.send(content[i : i + MAX_DISCORD_MSG])
+
+
+def load_all_transcripts() -> str:
+    with open(TRANSCRIPTS_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 #Returns all data in given sheet.
 def fetch_sheet_data(sheet):
     records = sheet.get_all_records()
@@ -55,21 +74,25 @@ def fetch_sheet_data(sheet):
     
 def choose_sheet_to_open(command):
  text = command.lower()
- # Product Master, Interviews, AND Dev Tracker query 
+ # Product Master, Interviews, AND Dev Tracker query
  if ("interview" in text or "interviews" in text) and ("devtracker" in text or "dev tracker" in text) and ("productmaster" in text or "product master" in text):
-     return interview_notes, dev_sheet, product_master_sheet
+     return load_all_transcripts(), dev_sheet, product_master_sheet
+ #Discord
+ elif ("discord" in text):
+     return None
+
  #Interview and Dev Tracker query
  elif ("interview" in text or "interviews" in text) and ("devtracker" in text or "dev tracker" in text):
-     return interview_notes, dev_sheet
+     return load_all_transcripts(), dev_sheet
  #Interview and Product Master query
  elif ("interview" in text or "interviews" in text) and ("productmaster" in text or "product master" in text):
-     return interview_notes, product_master_sheet
+     return load_all_transcripts(), product_master_sheet
  #Product Master and Dev Tracker query
  elif ("product master" in text or "productmaster" in text) and ("devtracker" in text or "dev tracker" in text):
      return product_master_sheet, dev_sheet
  #Pure interviews
  elif "interview" in text or "interviews" in text:
-     return interview_notes
+     return load_all_transcripts()
  #Pure dev-tracker
  elif "devtracker" in text or "dev tracker" in text:
      return dev_sheet
@@ -108,7 +131,7 @@ async def call_gemini(prompt):
 
 
 
-async def run_command(command: str) -> str:
+async def run_command(command: str, guild: discord.Guild) -> str:
     # Simplify the command text
     translator = str.maketrans("", "", string.punctuation)
     clean = command.translate(translator).lower()
@@ -118,43 +141,80 @@ async def run_command(command: str) -> str:
     has_dev = "devtracker" in clean_no_space or "dev tracker" in clean
     has_intv = "interview" in clean or "interviews" in clean
     has_pmaster = "product master" in clean or "master" in clean or "product" in clean
+    has_discord = "discord" in clean
     choice = choose_sheet_to_open(command)
 
-    # Handle Dev-Tracker, Interviews, and Product Master
-    if has_dev and has_intv and has_pmaster and isinstance(choice, tuple):
-        sheet_a, sheet_b, sheet_c  = choice
-        data_a = fetch_sheet_data(sheet_a)
-        data_b = fetch_sheet_data(sheet_b)
-        data_c = fetch_sheet_data(sheet_c)
-
+    #Check if choice was the transcript file.
+    if isinstance(choice, str):
+        # print(f"TRANSCRIPT: {choice}")
+        print("Analyzing Interview Transcripts")
         prompt = (
-            "Dev Tracker:\n"
-            f"{sheet_a.title} Data: {json.dumps(data_a, indent=2)}\n\n"
-            "User Interviews:\n"
-            f"{sheet_b.title} Data: {json.dumps(data_b, indent=2)}\n\n"
-            "Product Master:\n"
-            f"{sheet_c.title} Data: {json.dumps(data_c, indent=2)}\n\n"
-            f"Question: {command}\n"
-            "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
+            f"All Interview Transcripts: {choice}\n"
+            f"Prompt: {command}\n"
+            ""
         )
+       # print(prompt)
         return await call_gemini(prompt)
 
-    # Handles 2 sheet case
+
+    # Dev Tracker + Interviews + Product Master case
+    if has_dev and has_intv and has_pmaster \
+            and isinstance(choice, tuple) and len(choice) == 3:
+        first, second, third = choice
+
+        # 1) Extract the transcript text
+        transcripts = next(
+            (x for x in (first, second, third) if isinstance(x, str)),
+            ""
+        )
+
+        # 2) The remaining two items are your sheets
+        sheets = [x for x in (first, second, third) if not isinstance(x, str)]
+        dev_ws, pm_ws = sheets
+
+        # 3) Fetch data only from real Worksheet objects
+        dev_data = fetch_sheet_data(dev_ws)
+        pm_data = fetch_sheet_data(pm_ws)
+
+        # 4) Build the combined prompt
+        prompt = (
+            "Interview Transcripts:\n\n"
+            f"{transcripts}\n\n"
+            "Dev Tracker Data:\n"
+            f"{json.dumps(dev_data, indent=2)}\n\n"
+            "Product Master Data:\n"
+            f"{json.dumps(pm_data, indent=2)}\n\n"
+            f"Question: {command}\n"
+            "Please answer using only the content above."
+        )
+
+        return await call_gemini(prompt)
+
     if isinstance(choice, tuple) and len(choice) == 2:
-        sheet_a, sheet_b = choice
-        data_a = fetch_sheet_data(sheet_a)
-        data_b = fetch_sheet_data(sheet_b)
+        #Find out which is the transcript.txt vs. a google sheet.
+        first, second = choice
+
+        if isinstance(first, str):
+            transcripts = first
+            sheet = second
+        else:
+            transcripts = second
+            sheet = first
+        sheet_data = fetch_sheet_data(sheet)
         prompt = (
-            f"{sheet_a.title} Data:\n{json.dumps(data_a, indent=2)}\n\n"
-            f"{sheet_b.title} Data:\n{json.dumps(data_b, indent=2)}\n\n"
+            "Interview Transcripts:\n\n"
+            f"{transcripts}\n\n"
+            f"{sheet.title} Data:\n{json.dumps(sheet_data, indent=2)}\n\n"
             f"Question: {command}\n"
-            "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
+            "Please answer using only the content above."
         )
         return await call_gemini(prompt)
 
+    if choice is None:
+        print("Analyzing Discord Messages")
 
     # Single sheet logic. Must be a single Worksheet here
-    if not isinstance(choice, tuple):
+    if not isinstance(choice, tuple) and choice is not None:
         sheet = choice  # type: ignore
         # Debugging log
         print(f"Opened sheet: {sheet.title} (ID: {sheet.id})")
@@ -180,13 +240,8 @@ async def run_command(command: str) -> str:
             )
             return await call_gemini(prompt)
 
-        # Only “interview”
-        elif has_intv:
-            interview_data = fetch_sheet_data(interview_notes)
-            prompt = f"Interview data:{interview_data} '\n' Prompt: {command} KEEP YOUR RESPONSE UNDER 2000 CHARACTERS and no less than 1000 characters, but be as detailed and through as possible.\n\n"
-            return await call_gemini(prompt)
 
-        # 4c) Dev tracker only
+        # Dev tracker only
         elif has_dev:
             dev_data = fetch_sheet_data(sheet)
             prompt = (
@@ -196,7 +251,7 @@ async def run_command(command: str) -> str:
                 "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
             )
             return await call_gemini(prompt)
-
+        # Product Master Query
         elif has_pmaster:
             pmaster_data = fetch_sheet_data(product_master_sheet)
             prompt = (
@@ -206,6 +261,17 @@ async def run_command(command: str) -> str:
                 "Please keep your answer under 2000 characters and no less than 1000 characters, but be as detailed and through as possible."
             )
             return await call_gemini(prompt)
+
+    if has_discord:
+        messages = await collect_messages(guild)
+        print(f"Found {len(messages)} Discord Messages")
+        #print(messages)
+        prompt = (
+            "Discord Messages:\n"
+            f"{json.dumps(messages, indent=2)}\n\n"
+            f"Question: {command}\n"
+        )
+        return await call_gemini(prompt)
 
     # 5) Fallback for everything else
     return (
@@ -251,6 +317,7 @@ async def generate_contribution_data(messages):
         return json.loads(match.group()) if match else {"contributions": []}
     except Exception:
         return {"contributions": []}
+
 # Collect messages since a given time
 async def collect_messages(guild, after=None):
     msgs = []
@@ -340,6 +407,8 @@ async def on_member_join(member):
 async def on_message(message):
     if message.author == client.user or message.author.bot:
         return
+    print(f"🚨 Bot triggered by message: '{message.content}' from {message.author.name}")
+
 
     if (
             message.channel.name == "summary"
@@ -349,8 +418,8 @@ async def on_message(message):
     )
     ):
         # Choose which sheet to open, send sheet data along with prompt to gemini, output response.
-        reply = await run_command(message.content)
-        await message.channel.send(reply)
+        reply = await run_command(message.content, message.guild)
+        await send_long(message.channel, reply)
         return
 
     if message.author.name == "ubiq.world" and message.content.strip() != "/summary":
